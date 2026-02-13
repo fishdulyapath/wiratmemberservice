@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS mb_point_trans (
     sum_return_amount NUMERIC DEFAULT 0,
     sum_total_amount NUMERIC DEFAULT 0,
     get_point NUMERIC DEFAULT 0,
+    return_point NUMERIC DEFAULT 0,
     use_point NUMERIC DEFAULT 0,
     remark VARCHAR(255),
     lastedit_datetime TIMESTAMP WITHOUT TIME ZONE,
     PRIMARY KEY (doc_no)
 );
 
--- Point Transaction Detail
+-- Point Transaction Detail (เก็บรายการสินค้า ไม่เก็บแต้ม — แต้มอยู่ที่ header)
 CREATE TABLE IF NOT EXISTS mb_point_trans_detail (
     doc_date DATE NOT NULL,
     doc_no VARCHAR(25) NOT NULL,
@@ -36,8 +37,6 @@ CREATE TABLE IF NOT EXISTS mb_point_trans_detail (
     sale_amount NUMERIC DEFAULT 0,
     return_amount NUMERIC DEFAULT 0,
     total_amount NUMERIC DEFAULT 0,
-    get_point NUMERIC DEFAULT 0,
-    return_point NUMERIC DEFAULT 0,
     remark VARCHAR(255),
     lastedit_datetime TIMESTAMP WITHOUT TIME ZONE
 );

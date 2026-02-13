@@ -40,7 +40,7 @@ router.post("/login", async (req, res) => {
 
     // 2. ลองหาจาก erp_user (พนักงาน)
     //    code = username, password = password, name_1 = ชื่อ
-    const staffResult = await pool.query("SELECT code, password, name_1 FROM erp_user WHERE code = $1", [username]);
+    const staffResult = await pool.query("SELECT code, password, name_1 FROM erp_user WHERE upper(code) = $1", [username.toUpperCase()]);
     console.log(staffResult.rows);
     if (staffResult.rows.length > 0) {
       const staff = staffResult.rows[0];

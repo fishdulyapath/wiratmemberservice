@@ -138,22 +138,16 @@ class PointCalcService {
       }
     }
 
-    // Calculate points per condition group
+    // Calculate points per condition group (แต้มอยู่ที่หัวบิล ไม่ใช่รายสินค้า)
     let totalGetPoint = 0;
     const pointDetails = [];
 
     for (const [condCode, group] of Object.entries(conditionGroups)) {
       const cond = conditions[condCode];
-      // Floor division: how many times the total reaches the threshold
       const earnedPoint = Math.floor(group.totalAmount / cond.amountPerPoint) * cond.pointEarned;
       totalGetPoint += earnedPoint;
 
-      // Distribute points proportionally to each item
       for (const item of group.items) {
-        const itemPoint = group.totalAmount > 0
-          ? Math.round((item.amount / group.totalAmount) * earnedPoint * 100) / 100
-          : 0;
-
         pointDetails.push({
           doc_date: doc.doc_date,
           cust_code: doc.cust_code,
@@ -166,13 +160,12 @@ class PointCalcService {
           sale_amount: item.amount,
           return_amount: 0,
           total_amount: item.amount,
-          get_point: itemPoint,
           remark: condCode,
         });
       }
     }
 
-    // Items without conditions - still record them but 0 points
+    // Items without conditions
     for (const item of noConditionItems) {
       pointDetails.push({
         doc_date: doc.doc_date,
@@ -186,15 +179,8 @@ class PointCalcService {
         sale_amount: item.amount,
         return_amount: 0,
         total_amount: item.amount,
-        get_point: 0,
         remark: null,
       });
-    }
-
-    // Adjust rounding so detail points sum to total
-    const detailSum = pointDetails.reduce((s, d) => s + d.get_point, 0);
-    if (pointDetails.length > 0 && detailSum !== totalGetPoint) {
-      pointDetails[0].get_point += (totalGetPoint - detailSum);
     }
 
     return {
@@ -276,11 +262,9 @@ class PointCalcService {
       }
     }
 
+    // detail เก็บแค่ข้อมูลสินค้า — แต้มอยู่ที่ header
     const pointDetails = eligibleItems.map(item => {
       const amt = parseFloat(item.sum_amount) || 0;
-      const itemReturnPoint = returnTotalAmount > 0
-        ? Math.round((amt / returnTotalAmount) * deductPoint * 100) / 100
-        : 0;
       return {
         doc_date: doc.doc_date,
         cust_code: doc.cust_code,
@@ -293,17 +277,9 @@ class PointCalcService {
         sale_amount: 0,
         return_amount: amt,
         total_amount: -amt,
-        get_point: 0,
-        return_point: itemReturnPoint,
         remark: 'คืนสินค้า',
       };
     });
-
-    // ปรับปัดเศษให้ return_point รวมตรงกับ deductPoint
-    const detailReturnSum = pointDetails.reduce((s, d) => s + d.return_point, 0);
-    if (pointDetails.length > 0 && detailReturnSum !== deductPoint) {
-      pointDetails[0].return_point += (deductPoint - detailReturnSum);
-    }
 
     return {
       doc_date: doc.doc_date,
@@ -313,7 +289,8 @@ class PointCalcService {
       cust_code: doc.cust_code,
       sum_sale_amount: 0,
       sum_return_amount: returnTotalAmount,
-      get_point: -deductPoint,  // negative for returns
+      get_point: 0,
+      return_point: deductPoint,
       use_point: 0,
       remark: `คืนสินค้า อ้างอิง ${doc.doc_ref || '-'}`,
       details: pointDetails,
@@ -328,22 +305,23 @@ class PointCalcService {
     const now = new Date();
 
     await client.query(
-      `INSERT INTO mb_point_trans 
+      `INSERT INTO mb_point_trans
        (doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
-        sum_sale_amount, sum_return_amount, sum_total_amount, 
-        get_point, use_point, remark, lastedit_datetime)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        sum_sale_amount, sum_return_amount, sum_total_amount,
+        get_point, return_point, use_point, remark, lastedit_datetime)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (doc_no) DO UPDATE SET
         sum_sale_amount = EXCLUDED.sum_sale_amount,
         sum_return_amount = EXCLUDED.sum_return_amount,
         sum_total_amount = EXCLUDED.sum_total_amount,
         get_point = EXCLUDED.get_point,
+        return_point = EXCLUDED.return_point,
         use_point = EXCLUDED.use_point,
         remark = EXCLUDED.remark,
         lastedit_datetime = EXCLUDED.lastedit_datetime`,
       [trans.doc_date, trans.doc_time, docNo, trans.doc_no_sale, trans.doc_no_return,
        trans.cust_code, trans.sum_sale_amount, trans.sum_return_amount, sumTotal,
-       trans.get_point, trans.use_point, trans.remark, now]
+       trans.get_point, trans.return_point || 0, trans.use_point, trans.remark, now]
     );
 
     // Delete old details then insert new
@@ -353,10 +331,10 @@ class PointCalcService {
       await client.query(
         `INSERT INTO mb_point_trans_detail
          (doc_date, doc_no, cust_code, barcode, item_code, item_name, unit_code,
-          qty, price, sale_amount, return_amount, total_amount, get_point, return_point, remark, lastedit_datetime)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+          qty, price, sale_amount, return_amount, total_amount, remark, lastedit_datetime)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [d.doc_date, docNo, d.cust_code, d.barcode, d.item_code, d.item_name, d.unit_code,
-         d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.get_point, d.return_point || 0, d.remark, now]
+         d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.remark, now]
       );
     }
   }
@@ -365,19 +343,18 @@ class PointCalcService {
    * Update customer point balance
    */
   async updateCustomerPoints(client, custCode) {
-    // Sum all get_point and use_point from mb_point_trans
     const result = await client.query(
-      `SELECT 
-         COALESCE(SUM(CASE WHEN get_point > 0 THEN get_point ELSE 0 END), 0) AS total_get,
-         COALESCE(SUM(CASE WHEN get_point < 0 THEN ABS(get_point) ELSE 0 END), 0) AS total_return_deduct,
+      `SELECT
+         COALESCE(SUM(get_point), 0) AS total_get,
+         COALESCE(SUM(return_point), 0) AS total_return,
          COALESCE(SUM(use_point), 0) AS total_use
-       FROM mb_point_trans 
+       FROM mb_point_trans
        WHERE cust_code = $1`,
       [custCode]
     );
 
-    const { total_get, total_return_deduct, total_use } = result.rows[0];
-    const rewardPoint = parseFloat(total_get) - parseFloat(total_return_deduct);
+    const { total_get, total_return, total_use } = result.rows[0];
+    const rewardPoint = parseFloat(total_get) - parseFloat(total_return);
     const pointBalance = rewardPoint - parseFloat(total_use);
 
     await client.query(

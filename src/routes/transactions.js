@@ -53,7 +53,7 @@ router.get('/sales/:docNo/detail', authMiddleware, async (req, res) => {
 
     // Verify access
     const headerRes = await pool.query(
-      `SELECT doc_date, doc_time, doc_no, doc_ref, cust_code, lastedit_datetime
+      `SELECT doc_date, doc_time, doc_no, doc_ref, cust_code, lastedit_datetime,total_amount,total_vat_value,total_discount
        FROM ic_trans WHERE doc_no = $1 AND trans_flag = 44 AND last_status = 0`,
       [req.params.docNo]
     );
@@ -119,7 +119,7 @@ router.get('/returns/:docNo/detail', authMiddleware, async (req, res) => {
     const custCode = getCustCode(req);
 
     const headerRes = await pool.query(
-      `SELECT doc_date, doc_time, doc_no, doc_ref, cust_code, lastedit_datetime
+      `SELECT doc_date, doc_time, doc_no, doc_ref, cust_code, lastedit_datetime,total_amount,total_vat_value,total_discount
        FROM ic_trans WHERE doc_no = $1 AND trans_flag = 48 AND last_status = 0`,
       [req.params.docNo]
     );

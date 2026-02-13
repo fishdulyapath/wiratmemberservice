@@ -29,7 +29,7 @@ router.get("/movement", authMiddleware, async (req, res) => {
     const result = await pool.query(
       `SELECT doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
               sum_sale_amount, sum_return_amount, sum_total_amount,
-              get_point, use_point, remark, lastedit_datetime
+              get_point, return_point, use_point, remark, lastedit_datetime
        FROM mb_point_trans
        WHERE cust_code = $1
        ORDER BY doc_date DESC, doc_time DESC, doc_no DESC
@@ -52,7 +52,7 @@ router.get("/movement/:docNo/detail", authMiddleware, async (req, res) => {
     const headerRes = await pool.query(
       `SELECT doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
               sum_sale_amount, sum_return_amount, sum_total_amount,
-              get_point, use_point, remark, lastedit_datetime
+              get_point, return_point, use_point, remark, lastedit_datetime
        FROM mb_point_trans WHERE doc_no = $1`,
       [req.params.docNo]
     );
@@ -67,8 +67,8 @@ router.get("/movement/:docNo/detail", authMiddleware, async (req, res) => {
 
     const detailRes = await pool.query(
       `SELECT d.barcode, d.item_code, d.item_name, d.unit_code, d.qty, d.price,
-              d.sale_amount, d.return_amount, d.total_amount, d.get_point, d.return_point, d.remark,
-              s.name_1 AS discription
+              d.sale_amount, d.return_amount, d.total_amount, d.remark,
+              s.name_1 AS description
        FROM mb_point_trans_detail d
        LEFT JOIN ic_size s ON s.code = d.remark
        WHERE d.doc_no = $1
@@ -106,11 +106,11 @@ router.post("/add", authMiddleware, staffOnly, async (req, res) => {
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
     await client.query(
-      `INSERT INTO mb_point_trans 
+      `INSERT INTO mb_point_trans
        (doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
         sum_sale_amount, sum_return_amount, sum_total_amount,
-        get_point, use_point, remark, lastedit_datetime)
-       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,$5,0,$6,$7)`,
+        get_point, return_point, use_point, remark, lastedit_datetime)
+       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,$5,0,0,$6,$7)`,
       [today, time, docNo, cust_code, points, remark || `เพิ่มแต้มโดยพนักงาน ${req.user.username}`, now]
     );
     // console.log("Inserted point transaction:", { docNo, cust_code, points });
@@ -167,8 +167,8 @@ router.post("/use", authMiddleware, staffOnly, async (req, res) => {
       `INSERT INTO mb_point_trans
        (doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
         sum_sale_amount, sum_return_amount, sum_total_amount,
-        get_point, use_point, remark, lastedit_datetime)
-       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,0,$5,$6,$7)`,
+        get_point, return_point, use_point, remark, lastedit_datetime)
+       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,0,0,$5,$6,$7)`,
       [today, time, docNo, cust_code, points, remark || `ใช้แต้มโดยพนักงาน ${req.user.username}`, now]
     );
 
@@ -203,7 +203,7 @@ router.post("/cancel-use", authMiddleware, staffOnly, async (req, res) => {
 
     // Find the original use transaction
     const origRes = await client.query(
-      `SELECT doc_no, cust_code, use_point, remark FROM mb_point_trans 
+      `SELECT doc_no, cust_code, use_point, remark FROM mb_point_trans
        WHERE doc_no = $1 AND use_point > 0`,
       [doc_no]
     );
@@ -213,6 +213,15 @@ router.post("/cancel-use", authMiddleware, staffOnly, async (req, res) => {
     }
 
     const orig = origRes.rows[0];
+
+    // ตรวจสอบว่าเคยยกเลิกไปแล้วหรือไม่
+    const alreadyCancelled = await client.query(
+      `SELECT doc_no FROM mb_point_trans WHERE remark LIKE $1 AND use_point < 0`,
+      [`ยกเลิกการใช้แต้ม อ้างอิง ${doc_no}%`]
+    );
+    if (alreadyCancelled.rows.length > 0) {
+      return res.status(400).json({ error: "เอกสารนี้ถูกยกเลิกไปแล้ว" });
+    }
 
     await client.query("BEGIN");
 
@@ -226,8 +235,8 @@ router.post("/cancel-use", authMiddleware, staffOnly, async (req, res) => {
       `INSERT INTO mb_point_trans
        (doc_date, doc_time, doc_no, doc_no_sale, doc_no_return, cust_code,
         sum_sale_amount, sum_return_amount, sum_total_amount,
-        get_point, use_point, remark, lastedit_datetime)
-       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,0,$5,$6,$7)`,
+        get_point, return_point, use_point, remark, lastedit_datetime)
+       VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,0,0,$5,$6,$7)`,
       [today, time, newDocNo, orig.cust_code, -parseFloat(orig.use_point), `ยกเลิกการใช้แต้ม อ้างอิง ${doc_no} โดยพนักงาน ${req.user.username}`, now]
     );
 
