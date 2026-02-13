@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS mb_point_trans_detail (
     return_amount NUMERIC DEFAULT 0,
     total_amount NUMERIC DEFAULT 0,
     get_point NUMERIC DEFAULT 0,
+    return_point NUMERIC DEFAULT 0,
     remark VARCHAR(255),
     lastedit_datetime TIMESTAMP WITHOUT TIME ZONE
 );

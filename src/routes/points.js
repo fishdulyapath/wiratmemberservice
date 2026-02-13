@@ -1,12 +1,12 @@
-const express = require('express');
-const pool = require('../config/db');
-const { authMiddleware, staffOnly } = require('../middleware/auth');
-const pointCalcService = require('../services/pointCalcService');
+const express = require("express");
+const pool = require("../config/db");
+const { authMiddleware, staffOnly } = require("../middleware/auth");
+const pointCalcService = require("../services/pointCalcService");
 
 const router = express.Router();
 
 function getCustCode(req) {
-  if (req.user.role === 'staff') {
+  if (req.user.role === "staff") {
     return req.query.cust_code || req.body.cust_code;
   }
   return req.user.cust_code;
@@ -14,19 +14,16 @@ function getCustCode(req) {
 
 // GET /api/points/movement?cust_code=xxx&page=1
 // Point movement history (all point transactions)
-router.get('/movement', authMiddleware, async (req, res) => {
+router.get("/movement", authMiddleware, async (req, res) => {
   try {
     const custCode = getCustCode(req);
-    if (!custCode) return res.status(400).json({ error: 'กรุณาระบุรหัสสมาชิก' });
+    if (!custCode) return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิก" });
 
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     const offset = (page - 1) * limit;
 
-    const countRes = await pool.query(
-      'SELECT COUNT(*) FROM mb_point_trans WHERE cust_code = $1',
-      [custCode]
-    );
+    const countRes = await pool.query("SELECT COUNT(*) FROM mb_point_trans WHERE cust_code = $1", [custCode]);
     const total = parseInt(countRes.rows[0].count);
 
     const result = await pool.query(
@@ -42,13 +39,13 @@ router.get('/movement', authMiddleware, async (req, res) => {
 
     res.json({ data: result.rows, total, page, limit, totalPages: Math.ceil(total / limit) });
   } catch (err) {
-    console.error('Point movement error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    console.error("Point movement error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   }
 });
 
 // GET /api/points/movement/:docNo/detail
-router.get('/movement/:docNo/detail', authMiddleware, async (req, res) => {
+router.get("/movement/:docNo/detail", authMiddleware, async (req, res) => {
   try {
     const custCode = getCustCode(req);
 
@@ -61,53 +58,52 @@ router.get('/movement/:docNo/detail', authMiddleware, async (req, res) => {
     );
 
     if (headerRes.rows.length === 0) {
-      return res.status(404).json({ error: 'ไม่พบเอกสาร' });
+      return res.status(404).json({ error: "ไม่พบเอกสาร" });
     }
 
-    if (req.user.role === 'member' && headerRes.rows[0].cust_code !== custCode) {
-      return res.status(403).json({ error: 'ไม่มีสิทธิ์เข้าถึง' });
+    if (req.user.role === "member" && headerRes.rows[0].cust_code !== custCode) {
+      return res.status(403).json({ error: "ไม่มีสิทธิ์เข้าถึง" });
     }
 
     const detailRes = await pool.query(
-      `SELECT barcode, item_code, item_name, unit_code, qty, price,
-              sale_amount, return_amount, total_amount, get_point, remark
-       FROM mb_point_trans_detail
-       WHERE doc_no = $1
-       ORDER BY item_code`,
+      `SELECT d.barcode, d.item_code, d.item_name, d.unit_code, d.qty, d.price,
+              d.sale_amount, d.return_amount, d.total_amount, d.get_point, d.return_point, d.remark,
+              s.name_1 AS discription
+       FROM mb_point_trans_detail d
+       LEFT JOIN ic_size s ON s.code = d.remark
+       WHERE d.doc_no = $1
+       ORDER BY d.item_code`,
       [req.params.docNo]
     );
 
     res.json({ header: headerRes.rows[0], details: detailRes.rows });
   } catch (err) {
-    console.error('Point detail error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    console.error("Point detail error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   }
 });
 
 // POST /api/points/add - Staff adds points directly to a customer
-router.post('/add', authMiddleware, staffOnly, async (req, res) => {
+router.post("/add", authMiddleware, staffOnly, async (req, res) => {
   const client = await pool.connect();
   try {
     const { cust_code, points, remark } = req.body;
     if (!cust_code || !points || points <= 0) {
-      return res.status(400).json({ error: 'กรุณาระบุรหัสสมาชิกและจำนวนแต้ม' });
+      return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิกและจำนวนแต้ม" });
     }
 
     // Verify customer exists
-    const custRes = await client.query(
-      'SELECT code, name_1 FROM ar_customer WHERE code = $1',
-      [cust_code]
-    );
+    const custRes = await client.query("SELECT code, name_1 FROM ar_customer WHERE code = $1", [cust_code]);
     if (custRes.rows.length === 0) {
-      return res.status(404).json({ error: 'ไม่พบสมาชิก' });
+      return res.status(404).json({ error: "ไม่พบสมาชิก" });
     }
-
-    await client.query('BEGIN');
+    // console.log("Adding points to customer:", custRes.rows[0]);
+    await client.query("BEGIN");
 
     const docNo = await pointCalcService.generateDocNo(client);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
-    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
     await client.query(
       `INSERT INTO mb_point_trans 
@@ -117,16 +113,14 @@ router.post('/add', authMiddleware, staffOnly, async (req, res) => {
        VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,$5,0,$6,$7)`,
       [today, time, docNo, cust_code, points, remark || `เพิ่มแต้มโดยพนักงาน ${req.user.username}`, now]
     );
-
+    // console.log("Inserted point transaction:", { docNo, cust_code, points });
     await pointCalcService.updateCustomerPoints(client, cust_code);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // Get updated balance
-    const updatedRes = await pool.query(
-      'SELECT point_balance, reward_point FROM ar_customer WHERE code = $1',
-      [cust_code]
-    );
+    const updatedRes = await pool.query("SELECT point_balance, reward_point FROM ar_customer WHERE code = $1", [cust_code]);
 
+    // console.log("Updated customer points:", updatedRes.rows[0]);
     res.json({
       success: true,
       doc_no: docNo,
@@ -134,30 +128,27 @@ router.post('/add', authMiddleware, staffOnly, async (req, res) => {
       customer: updatedRes.rows[0],
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Add points error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    await client.query("ROLLBACK");
+    console.log("Add points error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   } finally {
     client.release();
   }
 });
 
 // POST /api/points/use - Staff uses (redeems) points for a customer
-router.post('/use', authMiddleware, staffOnly, async (req, res) => {
+router.post("/use", authMiddleware, staffOnly, async (req, res) => {
   const client = await pool.connect();
   try {
     const { cust_code, points, remark } = req.body;
     if (!cust_code || !points || points <= 0) {
-      return res.status(400).json({ error: 'กรุณาระบุรหัสสมาชิกและจำนวนแต้ม' });
+      return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิกและจำนวนแต้ม" });
     }
 
     // Check balance
-    const custRes = await client.query(
-      'SELECT code, name_1, point_balance FROM ar_customer WHERE code = $1',
-      [cust_code]
-    );
+    const custRes = await client.query("SELECT code, name_1, point_balance FROM ar_customer WHERE code = $1", [cust_code]);
     if (custRes.rows.length === 0) {
-      return res.status(404).json({ error: 'ไม่พบสมาชิก' });
+      return res.status(404).json({ error: "ไม่พบสมาชิก" });
     }
 
     const balance = parseFloat(custRes.rows[0].point_balance) || 0;
@@ -165,12 +156,12 @@ router.post('/use', authMiddleware, staffOnly, async (req, res) => {
       return res.status(400).json({ error: `แต้มไม่เพียงพอ (คงเหลือ ${balance})` });
     }
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const docNo = await pointCalcService.generateDocNo(client);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
-    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
     await client.query(
       `INSERT INTO mb_point_trans
@@ -182,12 +173,9 @@ router.post('/use', authMiddleware, staffOnly, async (req, res) => {
     );
 
     await pointCalcService.updateCustomerPoints(client, cust_code);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
-    const updatedRes = await pool.query(
-      'SELECT point_balance, reward_point FROM ar_customer WHERE code = $1',
-      [cust_code]
-    );
+    const updatedRes = await pool.query("SELECT point_balance, reward_point FROM ar_customer WHERE code = $1", [cust_code]);
 
     res.json({
       success: true,
@@ -196,21 +184,21 @@ router.post('/use', authMiddleware, staffOnly, async (req, res) => {
       customer: updatedRes.rows[0],
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Use points error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    await client.query("ROLLBACK");
+    console.error("Use points error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   } finally {
     client.release();
   }
 });
 
 // POST /api/points/cancel-use - Staff cancels a point usage (refund)
-router.post('/cancel-use', authMiddleware, staffOnly, async (req, res) => {
+router.post("/cancel-use", authMiddleware, staffOnly, async (req, res) => {
   const client = await pool.connect();
   try {
     const { doc_no } = req.body;
     if (!doc_no) {
-      return res.status(400).json({ error: 'กรุณาระบุเลขที่เอกสาร' });
+      return res.status(400).json({ error: "กรุณาระบุเลขที่เอกสาร" });
     }
 
     // Find the original use transaction
@@ -221,18 +209,18 @@ router.post('/cancel-use', authMiddleware, staffOnly, async (req, res) => {
     );
 
     if (origRes.rows.length === 0) {
-      return res.status(404).json({ error: 'ไม่พบเอกสารการใช้แต้ม' });
+      return res.status(404).json({ error: "ไม่พบเอกสารการใช้แต้ม" });
     }
 
     const orig = origRes.rows[0];
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // Create a reversal transaction (negative use_point to refund)
     const newDocNo = await pointCalcService.generateDocNo(client);
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
-    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
     await client.query(
       `INSERT INTO mb_point_trans
@@ -240,19 +228,13 @@ router.post('/cancel-use', authMiddleware, staffOnly, async (req, res) => {
         sum_sale_amount, sum_return_amount, sum_total_amount,
         get_point, use_point, remark, lastedit_datetime)
        VALUES ($1,$2,$3,NULL,NULL,$4,0,0,0,0,$5,$6,$7)`,
-      [today, time, newDocNo, orig.cust_code,
-       -parseFloat(orig.use_point),
-       `ยกเลิกการใช้แต้ม อ้างอิง ${doc_no} โดยพนักงาน ${req.user.username}`,
-       now]
+      [today, time, newDocNo, orig.cust_code, -parseFloat(orig.use_point), `ยกเลิกการใช้แต้ม อ้างอิง ${doc_no} โดยพนักงาน ${req.user.username}`, now]
     );
 
     await pointCalcService.updateCustomerPoints(client, orig.cust_code);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
-    const updatedRes = await pool.query(
-      'SELECT point_balance, reward_point FROM ar_customer WHERE code = $1',
-      [orig.cust_code]
-    );
+    const updatedRes = await pool.query("SELECT point_balance, reward_point FROM ar_customer WHERE code = $1", [orig.cust_code]);
 
     res.json({
       success: true,
@@ -261,38 +243,40 @@ router.post('/cancel-use', authMiddleware, staffOnly, async (req, res) => {
       customer: updatedRes.rows[0],
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Cancel use points error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    await client.query("ROLLBACK");
+    console.error("Cancel use points error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   } finally {
     client.release();
   }
 });
 
 // POST /api/points/recalc - Staff recalculates points for a customer
-router.post('/recalc', authMiddleware, staffOnly, async (req, res) => {
+router.post("/recalc", authMiddleware, staffOnly, async (req, res) => {
   try {
     const { cust_code } = req.body;
     if (!cust_code) {
-      return res.status(400).json({ error: 'กรุณาระบุรหัสสมาชิก' });
+      return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิก" });
     }
 
     const result = await pointCalcService.recalcCustomer(cust_code);
     res.json({ success: true, ...result });
   } catch (err) {
-    console.error('Recalc error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    console.error("Recalc error:", err);
+    res.status(500).json({ error: "เกิดข้อผิดพลาด" });
   }
 });
 
 // POST /api/points/process-all - Staff triggers manual point processing
-router.post('/process-all', authMiddleware, staffOnly, async (req, res) => {
+// ทำงาน async — ตอบ response ทันทีแล้วคำนวณ background
+router.post("/process-all", authMiddleware, staffOnly, async (req, res) => {
+  res.json({ success: true, message: "เริ่มคำนวณแต้มแล้ว กรุณารอสักครู่", processing: true });
+
   try {
     const result = await pointCalcService.processAllDocs();
-    res.json(result);
+    console.log("[PointCalc] Process-all completed:", result);
   } catch (err) {
-    console.error('Process all error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+    console.error("Process all error:", err);
   }
 });
 

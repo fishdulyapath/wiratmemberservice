@@ -63,14 +63,21 @@ class PointCalcService {
   }
 
   /**
-   * Get point condition code for a specific item
+   * Batch get point condition codes for multiple item codes
+   * Returns Map: { item_code -> condition_code }
    */
-  async getItemCondition(client, itemCode) {
+  async getItemConditions(client, itemCodes) {
+    const map = new Map();
+    if (itemCodes.length === 0) return map;
+    const placeholders = itemCodes.map((_, i) => `$${i + 1}`).join(',');
     const result = await client.query(
-      `SELECT code FROM ic_size_use WHERE ic_code = $1 LIMIT 1`,
-      [itemCode]
+      `SELECT DISTINCT ON (ic_code) ic_code, code FROM ic_size_use WHERE ic_code IN (${placeholders})`,
+      itemCodes
     );
-    return result.rows.length > 0 ? result.rows[0].code : null;
+    for (const row of result.rows) {
+      map.set(row.ic_code, row.code);
+    }
+    return map;
   }
 
   /**
@@ -109,6 +116,7 @@ class PointCalcService {
     if (eligibleItems.length === 0) return null;
 
     const conditions = await this.getPointConditions(client);
+    const itemCondMap = await this.getItemConditions(client, [...new Set(eligibleItems.map(r => r.item_code))]);
 
     // Group items by their point condition
     // conditionCode -> { totalAmount, items[] }
@@ -116,7 +124,7 @@ class PointCalcService {
     const noConditionItems = [];
 
     for (const item of eligibleItems) {
-      const condCode = await this.getItemCondition(client, item.item_code);
+      const condCode = itemCondMap.get(item.item_code) || null;
 
       if (condCode && conditions[condCode]) {
         if (!conditionGroups[condCode]) {
@@ -251,10 +259,11 @@ class PointCalcService {
     } else {
       // If no original found, recalculate based on conditions
       const conditions = await this.getPointConditions(client);
+      const itemCondMap = await this.getItemConditions(client, [...new Set(eligibleItems.map(r => r.item_code))]);
       const conditionGroups = {};
 
       for (const item of eligibleItems) {
-        const condCode = await this.getItemCondition(client, item.item_code);
+        const condCode = itemCondMap.get(item.item_code) || null;
         if (condCode && conditions[condCode]) {
           if (!conditionGroups[condCode]) conditionGroups[condCode] = { totalAmount: 0 };
           conditionGroups[condCode].totalAmount += (parseFloat(item.sum_amount) || 0);
@@ -267,21 +276,34 @@ class PointCalcService {
       }
     }
 
-    const pointDetails = eligibleItems.map(item => ({
-      doc_date: doc.doc_date,
-      cust_code: doc.cust_code,
-      barcode: item.barcode,
-      item_code: item.item_code,
-      item_name: item.item_name,
-      unit_code: item.unit_code,
-      qty: item.qty,
-      price: item.price,
-      sale_amount: 0,
-      return_amount: parseFloat(item.sum_amount) || 0,
-      total_amount: -(parseFloat(item.sum_amount) || 0),
-      get_point: 0,
-      remark: 'คืนสินค้า',
-    }));
+    const pointDetails = eligibleItems.map(item => {
+      const amt = parseFloat(item.sum_amount) || 0;
+      const itemReturnPoint = returnTotalAmount > 0
+        ? Math.round((amt / returnTotalAmount) * deductPoint * 100) / 100
+        : 0;
+      return {
+        doc_date: doc.doc_date,
+        cust_code: doc.cust_code,
+        barcode: item.barcode,
+        item_code: item.item_code,
+        item_name: item.item_name,
+        unit_code: item.unit_code,
+        qty: item.qty,
+        price: item.price,
+        sale_amount: 0,
+        return_amount: amt,
+        total_amount: -amt,
+        get_point: 0,
+        return_point: itemReturnPoint,
+        remark: 'คืนสินค้า',
+      };
+    });
+
+    // ปรับปัดเศษให้ return_point รวมตรงกับ deductPoint
+    const detailReturnSum = pointDetails.reduce((s, d) => s + d.return_point, 0);
+    if (pointDetails.length > 0 && detailReturnSum !== deductPoint) {
+      pointDetails[0].return_point += (deductPoint - detailReturnSum);
+    }
 
     return {
       doc_date: doc.doc_date,
@@ -331,10 +353,10 @@ class PointCalcService {
       await client.query(
         `INSERT INTO mb_point_trans_detail
          (doc_date, doc_no, cust_code, barcode, item_code, item_name, unit_code,
-          qty, price, sale_amount, return_amount, total_amount, get_point, remark, lastedit_datetime)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          qty, price, sale_amount, return_amount, total_amount, get_point, return_point, remark, lastedit_datetime)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [d.doc_date, docNo, d.cust_code, d.barcode, d.item_code, d.item_name, d.unit_code,
-         d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.get_point, d.remark, now]
+         d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.get_point, d.return_point || 0, d.remark, now]
       );
     }
   }
@@ -367,25 +389,92 @@ class PointCalcService {
   }
 
   /**
-   * Main: Process all unprocessed/modified documents
+   * Process a single document (sale or return) within its own transaction
+   * Returns true if points were earned, false if skipped (no eligible items)
    */
-  async processAllDocs() {
+  async processOneDoc(doc, transFlag) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
+      const isSale = transFlag === 44;
+      const docRefCol = isSale ? 'doc_no_sale' : 'doc_no_return';
+
+      // Check if this doc was modified since last calc (re-process needed)
+      const logRes = await client.query(
+        `SELECT lastedit_datetime FROM mb_point_calc_log WHERE doc_no = $1 AND trans_flag = $2`,
+        [doc.doc_no, transFlag]
+      );
+      const isReprocess = logRes.rows.length > 0;
+
+      if (isReprocess) {
+        // เอกสารเคยคำนวณแล้ว แต่ถูกแก้ไข → ลบ point_trans เดิมแล้วคำนวณใหม่
+        const oldTrans = await client.query(
+          `SELECT doc_no, cust_code FROM mb_point_trans WHERE ${docRefCol} = $1`,
+          [doc.doc_no]
+        );
+        for (const old of oldTrans.rows) {
+          await client.query(`DELETE FROM mb_point_trans_detail WHERE doc_no = $1`, [old.doc_no]);
+          await client.query(`DELETE FROM mb_point_trans WHERE doc_no = $1`, [old.doc_no]);
+        }
+      }
+
+      // Calculate points
+      const trans = isSale
+        ? await this.calcSaleDoc(client, doc)
+        : await this.calcReturnDoc(client, doc);
+
+      if (trans) {
+        const pointDocNo = await this.generateDocNo(client);
+        await this.savePointTrans(client, pointDocNo, trans);
+        await this.updateCustomerPoints(client, doc.cust_code);
+      } else if (isReprocess) {
+        // เคยมีแต้ม แต่ตอนนี้ไม่มี eligible items → อัพเดท balance ของลูกค้า
+        await this.updateCustomerPoints(client, doc.cust_code);
+      }
+
+      // บันทึก calc_log ทุกเอกสาร (แม้ได้ 0 แต้ม) เพื่อข้ามในรอบถัดไป
+      await client.query(
+        `INSERT INTO mb_point_calc_log (doc_no, trans_flag, lastedit_datetime, calc_datetime)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (doc_no, trans_flag) DO UPDATE SET
+           lastedit_datetime = EXCLUDED.lastedit_datetime,
+           calc_datetime = NOW()`,
+        [doc.doc_no, transFlag, doc.lastedit_datetime]
+      );
+
+      await client.query('COMMIT');
+      return trans !== null;
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error(`[PointCalc] Error processing ${doc.doc_no}:`, err.message);
+      return false;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Main: Process all unprocessed/modified documents
+   * - ข้ามเอกสารที่เคยคำนวณแล้ว (อยู่ใน mb_point_calc_log)
+   * - ถ้าเอกสารถูกแก้ไข (lastedit_datetime เปลี่ยน) → ลบ transaction เดิม แล้วคำนวณใหม่
+   * - commit ทีละเอกสาร เพื่อไม่ให้ transaction ใหญ่เกินไป
+   */
+  async processAllDocs() {
+    const client = await pool.connect();
+    let saleDocs, returnDocs;
+
+    try {
       // ตรวจสอบช่วงวันที่ที่ active — ถ้าไม่มี ไม่คำนวณ
       const periodFilter = await this.getActivePeriodFilter(client);
       if (!periodFilter) {
-        await client.query('COMMIT');
         console.log('[PointCalc] No active point period configured, skipping');
         return { success: true, processedCount: 0, message: 'ไม่มีช่วงวันที่ให้แต้มที่เปิดใช้งาน' };
       }
 
-      let processedCount = 0;
-
-      // --- Process Sale Documents (trans_flag = 44) ---
-      const saleDocs = await client.query(
+      // --- ดึงรายการเอกสารที่ต้องประมวลผล (ยังไม่เคย หรือ ถูกแก้ไข) ---
+      saleDocs = (await client.query(
         `SELECT t.doc_date, t.doc_time, t.doc_no, t.doc_ref, t.doc_ref_date,
                t.cust_code, t.lastedit_datetime
         FROM ic_trans t
@@ -401,42 +490,12 @@ class PointCalcService {
               SELECT l.lastedit_datetime FROM mb_point_calc_log l
               WHERE l.doc_no = t.doc_no AND l.trans_flag = 44
             )
-          )`,
+          )
+        ORDER BY t.doc_date, t.doc_time`,
         periodFilter.params
-      );
+      )).rows;
 
-      console.log(`[PointCalc] Found ${saleDocs.rows.length} sale docs to process`);
-
-      for (const doc of saleDocs.rows) {
-        const trans = await this.calcSaleDoc(client, doc);
-        if (trans) {
-          const existing = await client.query(
-            `SELECT doc_no FROM mb_point_trans WHERE doc_no_sale = $1`,
-            [doc.doc_no]
-          );
-
-          const pointDocNo = existing.rows.length > 0
-            ? existing.rows[0].doc_no
-            : await this.generateDocNo(client);
-
-          await this.savePointTrans(client, pointDocNo, trans);
-          await this.updateCustomerPoints(client, doc.cust_code);
-
-          await client.query(
-            `INSERT INTO mb_point_calc_log (doc_no, trans_flag, lastedit_datetime, calc_datetime)
-             VALUES ($1, 44, $2, NOW())
-             ON CONFLICT (doc_no, trans_flag) DO UPDATE SET
-               lastedit_datetime = EXCLUDED.lastedit_datetime,
-               calc_datetime = NOW()`,
-            [doc.doc_no, doc.lastedit_datetime]
-          );
-
-          processedCount++;
-        }
-      }
-
-      // --- Process Return Documents (trans_flag = 48) ---
-      const returnDocs = await client.query(
+      returnDocs = (await client.query(
         `SELECT t.doc_date, t.doc_time, t.doc_no, t.doc_ref, t.doc_ref_date,
                t.cust_code, t.lastedit_datetime
         FROM ic_trans t
@@ -452,51 +511,35 @@ class PointCalcService {
               SELECT l.lastedit_datetime FROM mb_point_calc_log l
               WHERE l.doc_no = t.doc_no AND l.trans_flag = 48
             )
-          )`,
+          )
+        ORDER BY t.doc_date, t.doc_time`,
         periodFilter.params
-      );
+      )).rows;
 
-      console.log(`[PointCalc] Found ${returnDocs.rows.length} return docs to process`);
-
-      for (const doc of returnDocs.rows) {
-        const trans = await this.calcReturnDoc(client, doc);
-        if (trans) {
-          const existing = await client.query(
-            `SELECT doc_no FROM mb_point_trans WHERE doc_no_return = $1`,
-            [doc.doc_no]
-          );
-
-          const pointDocNo = existing.rows.length > 0
-            ? existing.rows[0].doc_no
-            : await this.generateDocNo(client);
-
-          await this.savePointTrans(client, pointDocNo, trans);
-          await this.updateCustomerPoints(client, doc.cust_code);
-
-          await client.query(
-            `INSERT INTO mb_point_calc_log (doc_no, trans_flag, lastedit_datetime, calc_datetime)
-             VALUES ($1, 48, $2, NOW())
-             ON CONFLICT (doc_no, trans_flag) DO UPDATE SET
-               lastedit_datetime = EXCLUDED.lastedit_datetime,
-               calc_datetime = NOW()`,
-            [doc.doc_no, doc.lastedit_datetime]
-          );
-
-          processedCount++;
-        }
-      }
-
-      await client.query('COMMIT');
-      console.log(`[PointCalc] Processed ${processedCount} documents`);
-      return { success: true, processedCount };
-
-    } catch (err) {
-      await client.query('ROLLBACK');
-      console.error('[PointCalc] Error:', err);
-      throw err;
     } finally {
       client.release();
     }
+
+    console.log(`[PointCalc] Found ${saleDocs.length} sale docs, ${returnDocs.length} return docs to process`);
+
+    let processedCount = 0;
+    let skippedCount = 0;
+
+    // --- Process ทีละเอกสาร (แต่ละตัว commit เอง) ---
+    for (const doc of saleDocs) {
+      const hasPoints = await this.processOneDoc(doc, 44);
+      if (hasPoints) processedCount++;
+      else skippedCount++;
+    }
+
+    for (const doc of returnDocs) {
+      const hasPoints = await this.processOneDoc(doc, 48);
+      if (hasPoints) processedCount++;
+      else skippedCount++;
+    }
+
+    console.log(`[PointCalc] Done: ${processedCount} processed, ${skippedCount} skipped (no eligible items)`);
+    return { success: true, processedCount, skippedCount };
   }
 
   /**

@@ -9,7 +9,8 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 5000,
+  idle_in_transaction_session_timeout: 300000, // 5 min max idle in transaction — ป้องกัน lock ค้าง
 });
 
 pool.on('error', (err) => {

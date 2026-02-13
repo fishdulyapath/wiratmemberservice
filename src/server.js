@@ -52,6 +52,11 @@ cron.schedule(cronExpression, async () => {
 
 console.log(`[Cron] Point calculation scheduled: ${cronExpression}`);
 
+// Catch unhandled errors to prevent server crash
+process.on('unhandledRejection', (err) => {
+  console.error('[Server] Unhandled rejection:', err);
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
