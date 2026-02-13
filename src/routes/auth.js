@@ -9,7 +9,7 @@ const router = express.Router();
 // ลอง ar_customer (member) ก่อน → ถ้าไม่เจอ ลอง erp_user (staff)
 router.post("/login", async (req, res) => {
   try {
-    console.log("Login attempt:", req.body);
+    // console.log("Login attempt:", req.body);
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: "กรุณากรอก username และ password" });

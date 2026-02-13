@@ -31,7 +31,7 @@ router.get('/sales', authMiddleware, async (req, res) => {
     const total = parseInt(countRes.rows[0].count);
 
     const result = await pool.query(
-      `SELECT doc_date, doc_time, doc_no, doc_ref, doc_ref_date, cust_code, lastedit_datetime
+      `SELECT doc_date, doc_time, doc_no, doc_ref, doc_ref_date, cust_code, lastedit_datetime,total_amount
        FROM ic_trans 
        WHERE trans_flag = 44 AND last_status = 0 AND cust_code = $1
        ORDER BY doc_date DESC, doc_time DESC
@@ -98,7 +98,7 @@ router.get('/returns', authMiddleware, async (req, res) => {
     const total = parseInt(countRes.rows[0].count);
 
     const result = await pool.query(
-      `SELECT doc_date, doc_time, doc_no, doc_ref, doc_ref_date, cust_code, lastedit_datetime
+      `SELECT doc_date, doc_time, doc_no, doc_ref, doc_ref_date, cust_code, lastedit_datetime,total_amount
        FROM ic_trans 
        WHERE trans_flag = 48 AND last_status = 0 AND cust_code = $1
        ORDER BY doc_date DESC, doc_time DESC
