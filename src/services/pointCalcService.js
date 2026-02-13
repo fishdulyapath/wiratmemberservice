@@ -534,9 +534,19 @@ class PointCalcService {
         return { pointBalance: 0, rewardPoint: 0, message: 'ไม่มีช่วงวันที่ให้แต้มที่เปิดใช้งาน' };
       }
 
-      // Delete existing point trans for this customer (ยกเว้น use_point ที่เป็นการใช้แต้ม)
-      await client.query(`DELETE FROM mb_point_trans_detail WHERE cust_code = $1`, [custCode]);
-      await client.query(`DELETE FROM mb_point_trans WHERE cust_code = $1 AND use_point = 0`, [custCode]);
+      // ลบเฉพาะรายการที่มาจากการคำนวณอัตโนมัติ (มี doc_no_sale หรือ doc_no_return)
+      // ไม่ลบรายการ manual: เพิ่มแต้ม, ใช้แต้ม, ยกเลิกใช้แต้ม (ไม่มี doc_no_sale/doc_no_return)
+      await client.query(
+        `DELETE FROM mb_point_trans_detail WHERE doc_no IN (
+           SELECT doc_no FROM mb_point_trans
+           WHERE cust_code = $1 AND (doc_no_sale IS NOT NULL OR doc_no_return IS NOT NULL)
+         )`,
+        [custCode]
+      );
+      await client.query(
+        `DELETE FROM mb_point_trans WHERE cust_code = $1 AND (doc_no_sale IS NOT NULL OR doc_no_return IS NOT NULL)`,
+        [custCode]
+      );
       await client.query(
         `DELETE FROM mb_point_calc_log WHERE doc_no IN (
            SELECT doc_no FROM ic_trans WHERE cust_code = $1 AND trans_flag IN (44, 48) AND last_status = 0
