@@ -38,7 +38,7 @@ class PointCalcService {
   }
 
   /**
-   * Get all point conditions from ic_size
+   * Get all point conditions from ic_size (cached per instance call)
    * Returns map: { code -> { code, name_1, amount_per_point, point_earned } }
    */
   async getPointConditions(client) {
@@ -95,31 +95,50 @@ class PointCalcService {
   }
 
   /**
-   * Calculate points for a single sale document (trans_flag=44)
+   * Preload all lookup data once for batch processing
+   * Returns { conditions, havePointSet, itemCondMap }
    */
-  async calcSaleDoc(client, doc) {
-    // Get detail items
+  async preloadLookups(client, allItemCodes) {
+    const uniqueItems = [...new Set(allItemCodes)];
+    const [conditions, havePointSet, itemCondMap] = await Promise.all([
+      this.getPointConditions(client),
+      this.getHavePointItems(client, uniqueItems),
+      this.getItemConditions(client, uniqueItems),
+    ]);
+    return { conditions, havePointSet, itemCondMap };
+  }
+
+  /**
+   * Calculate points for a single sale document (trans_flag=44)
+   * Accepts optional preloaded lookups to avoid repeated queries
+   */
+  async calcSaleDoc(client, doc, lookups = null) {
     const detailRes = await client.query(
       `SELECT barcode, item_code, item_name, unit_code, qty, price, sum_amount
-       FROM ic_trans_detail 
+       FROM ic_trans_detail
        WHERE doc_no = $1 AND trans_flag = 44`,
       [doc.doc_no]
     );
 
     if (detailRes.rows.length === 0) return null;
 
-    // Filter: only items with have_point = 1 in ic_inventory_detail
-    const allItemCodes = detailRes.rows.map(r => r.item_code);
-    const havePointSet = await this.getHavePointItems(client, [...new Set(allItemCodes)]);
-    const eligibleItems = detailRes.rows.filter(r => havePointSet.has(r.item_code));
+    // Use preloaded lookups or fetch individually
+    let havePointSet, conditions, itemCondMap;
+    if (lookups) {
+      havePointSet = lookups.havePointSet;
+      conditions = lookups.conditions;
+      itemCondMap = lookups.itemCondMap;
+    } else {
+      const allItemCodes = detailRes.rows.map(r => r.item_code);
+      havePointSet = await this.getHavePointItems(client, [...new Set(allItemCodes)]);
+      conditions = await this.getPointConditions(client);
+      itemCondMap = await this.getItemConditions(client, [...new Set(allItemCodes)]);
+    }
 
+    const eligibleItems = detailRes.rows.filter(r => havePointSet.has(r.item_code));
     if (eligibleItems.length === 0) return null;
 
-    const conditions = await this.getPointConditions(client);
-    const itemCondMap = await this.getItemConditions(client, [...new Set(eligibleItems.map(r => r.item_code))]);
-
     // Group items by their point condition
-    // conditionCode -> { totalAmount, items[] }
     const conditionGroups = {};
     const noConditionItems = [];
 
@@ -138,7 +157,6 @@ class PointCalcService {
       }
     }
 
-    // Calculate points per condition group (แต้มอยู่ที่หัวบิล ไม่ใช่รายสินค้า)
     let totalGetPoint = 0;
     const pointDetails = [];
 
@@ -165,7 +183,6 @@ class PointCalcService {
       }
     }
 
-    // Items without conditions
     for (const item of noConditionItems) {
       pointDetails.push({
         doc_date: doc.doc_date,
@@ -200,28 +217,34 @@ class PointCalcService {
 
   /**
    * Calculate points for a return document (trans_flag=48)
-   * Returns negative points (deduction)
+   * Accepts optional preloaded lookups
    */
-  async calcReturnDoc(client, doc) {
+  async calcReturnDoc(client, doc, lookups = null) {
     const detailRes = await client.query(
       `SELECT barcode, item_code, item_name, unit_code, qty, price, sum_amount
-       FROM ic_trans_detail 
+       FROM ic_trans_detail
        WHERE doc_no = $1 AND trans_flag = 48`,
       [doc.doc_no]
     );
 
     if (detailRes.rows.length === 0) return null;
 
-    // Filter: only items with have_point = 1 in ic_inventory_detail
-    const allItemCodes = detailRes.rows.map(r => r.item_code);
-    const havePointSet = await this.getHavePointItems(client, [...new Set(allItemCodes)]);
-    const eligibleItems = detailRes.rows.filter(r => havePointSet.has(r.item_code));
+    let havePointSet, conditions, itemCondMap;
+    if (lookups) {
+      havePointSet = lookups.havePointSet;
+      conditions = lookups.conditions;
+      itemCondMap = lookups.itemCondMap;
+    } else {
+      const allItemCodes = detailRes.rows.map(r => r.item_code);
+      havePointSet = await this.getHavePointItems(client, [...new Set(allItemCodes)]);
+      conditions = await this.getPointConditions(client);
+      itemCondMap = await this.getItemConditions(client, [...new Set(allItemCodes)]);
+    }
 
+    const eligibleItems = detailRes.rows.filter(r => havePointSet.has(r.item_code));
     if (eligibleItems.length === 0) return null;
 
-    // For returns: we need to figure out points to deduct
-    // Look at the original sale's point calculation
-    // Find the original sale point trans
+    // Find the original sale's point calculation for proportional deduction
     let originalGetPoint = 0;
     let originalSaleAmount = 0;
 
@@ -238,16 +261,11 @@ class PointCalcService {
 
     const returnTotalAmount = eligibleItems.reduce((s, r) => s + (parseFloat(r.sum_amount) || 0), 0);
 
-    // Proportional point deduction based on return amount vs original sale amount
     let deductPoint = 0;
     if (originalSaleAmount > 0 && originalGetPoint > 0) {
       deductPoint = Math.floor((returnTotalAmount / originalSaleAmount) * originalGetPoint);
     } else {
-      // If no original found, recalculate based on conditions
-      const conditions = await this.getPointConditions(client);
-      const itemCondMap = await this.getItemConditions(client, [...new Set(eligibleItems.map(r => r.item_code))]);
       const conditionGroups = {};
-
       for (const item of eligibleItems) {
         const condCode = itemCondMap.get(item.item_code) || null;
         if (condCode && conditions[condCode]) {
@@ -255,14 +273,12 @@ class PointCalcService {
           conditionGroups[condCode].totalAmount += (parseFloat(item.sum_amount) || 0);
         }
       }
-
       for (const [condCode, group] of Object.entries(conditionGroups)) {
         const cond = conditions[condCode];
         deductPoint += Math.floor(group.totalAmount / cond.amountPerPoint) * cond.pointEarned;
       }
     }
 
-    // detail เก็บแค่ข้อมูลสินค้า — แต้มอยู่ที่ header
     const pointDetails = eligibleItems.map(item => {
       const amt = parseFloat(item.sum_amount) || 0;
       return {
@@ -298,7 +314,7 @@ class PointCalcService {
   }
 
   /**
-   * Save point transaction
+   * Save point transaction (batch INSERT for details)
    */
   async savePointTrans(client, docNo, trans) {
     const sumTotal = trans.sum_sale_amount - trans.sum_return_amount;
@@ -324,17 +340,29 @@ class PointCalcService {
        trans.get_point, trans.return_point || 0, trans.use_point, trans.remark, now]
     );
 
-    // Delete old details then insert new
+    // Delete old details then batch insert new
     await client.query(`DELETE FROM mb_point_trans_detail WHERE doc_no = $1`, [docNo]);
 
-    for (const d of trans.details) {
+    if (trans.details.length > 0) {
+      // Batch INSERT — สร้าง VALUES clause ทีเดียว แทน INSERT ทีละ row
+      const cols = 14;
+      const values = [];
+      const params = [];
+      for (let i = 0; i < trans.details.length; i++) {
+        const d = trans.details[i];
+        const offset = i * cols;
+        values.push(`(${Array.from({ length: cols }, (_, j) => `$${offset + j + 1}`).join(',')})`);
+        params.push(
+          d.doc_date, docNo, d.cust_code, d.barcode, d.item_code, d.item_name, d.unit_code,
+          d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.remark, now
+        );
+      }
       await client.query(
         `INSERT INTO mb_point_trans_detail
          (doc_date, doc_no, cust_code, barcode, item_code, item_name, unit_code,
           qty, price, sale_amount, return_amount, total_amount, remark, lastedit_datetime)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [d.doc_date, docNo, d.cust_code, d.barcode, d.item_code, d.item_name, d.unit_code,
-         d.qty, d.price, d.sale_amount, d.return_amount, d.total_amount, d.remark, now]
+         VALUES ${values.join(',')}`,
+        params
       );
     }
   }
@@ -369,7 +397,7 @@ class PointCalcService {
    * Process a single document (sale or return) within its own transaction
    * Returns true if points were earned, false if skipped (no eligible items)
    */
-  async processOneDoc(doc, transFlag) {
+  async processOneDoc(doc, transFlag, lookups = null) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -385,7 +413,6 @@ class PointCalcService {
       const isReprocess = logRes.rows.length > 0;
 
       if (isReprocess) {
-        // เอกสารเคยคำนวณแล้ว แต่ถูกแก้ไข → ลบ point_trans เดิมแล้วคำนวณใหม่
         const oldTrans = await client.query(
           `SELECT doc_no, cust_code FROM mb_point_trans WHERE ${docRefCol} = $1`,
           [doc.doc_no]
@@ -396,21 +423,18 @@ class PointCalcService {
         }
       }
 
-      // Calculate points
       const trans = isSale
-        ? await this.calcSaleDoc(client, doc)
-        : await this.calcReturnDoc(client, doc);
+        ? await this.calcSaleDoc(client, doc, lookups)
+        : await this.calcReturnDoc(client, doc, lookups);
 
       if (trans) {
         const pointDocNo = await this.generateDocNo(client);
         await this.savePointTrans(client, pointDocNo, trans);
         await this.updateCustomerPoints(client, doc.cust_code);
       } else if (isReprocess) {
-        // เคยมีแต้ม แต่ตอนนี้ไม่มี eligible items → อัพเดท balance ของลูกค้า
         await this.updateCustomerPoints(client, doc.cust_code);
       }
 
-      // บันทึก calc_log ทุกเอกสาร (แม้ได้ 0 แต้ม) เพื่อข้ามในรอบถัดไป
       await client.query(
         `INSERT INTO mb_point_calc_log (doc_no, trans_flag, lastedit_datetime, calc_datetime)
          VALUES ($1, $2, $3, NOW())
@@ -434,23 +458,18 @@ class PointCalcService {
 
   /**
    * Main: Process all unprocessed/modified documents
-   * - ข้ามเอกสารที่เคยคำนวณแล้ว (อยู่ใน mb_point_calc_log)
-   * - ถ้าเอกสารถูกแก้ไข (lastedit_datetime เปลี่ยน) → ลบ transaction เดิม แล้วคำนวณใหม่
-   * - commit ทีละเอกสาร เพื่อไม่ให้ transaction ใหญ่เกินไป
    */
   async processAllDocs() {
     const client = await pool.connect();
-    let saleDocs, returnDocs;
+    let saleDocs, returnDocs, lookups;
 
     try {
-      // ตรวจสอบช่วงวันที่ที่ active — ถ้าไม่มี ไม่คำนวณ
       const periodFilter = await this.getActivePeriodFilter(client);
       if (!periodFilter) {
         console.log('[PointCalc] No active point period configured, skipping');
         return { success: true, processedCount: 0, message: 'ไม่มีช่วงวันที่ให้แต้มที่เปิดใช้งาน' };
       }
 
-      // --- ดึงรายการเอกสารที่ต้องประมวลผล (ยังไม่เคย หรือ ถูกแก้ไข) ---
       saleDocs = (await client.query(
         `SELECT t.doc_date, t.doc_time, t.doc_no, t.doc_ref, t.doc_ref_date,
                t.cust_code, t.lastedit_datetime
@@ -493,6 +512,21 @@ class PointCalcService {
         periodFilter.params
       )).rows;
 
+      // Preload lookups ครั้งเดียว ถ้ามีเอกสารต้องประมวลผล
+      if (saleDocs.length > 0 || returnDocs.length > 0) {
+        // ดึง item_code ทั้งหมดจากเอกสารที่ต้องประมวลผล
+        const allDocNos = [...saleDocs.map(d => d.doc_no), ...returnDocs.map(d => d.doc_no)];
+        if (allDocNos.length > 0) {
+          const placeholders = allDocNos.map((_, i) => `$${i + 1}`).join(',');
+          const itemRes = await client.query(
+            `SELECT DISTINCT item_code FROM ic_trans_detail WHERE doc_no IN (${placeholders})`,
+            allDocNos
+          );
+          const allItemCodes = itemRes.rows.map(r => r.item_code);
+          lookups = await this.preloadLookups(client, allItemCodes);
+        }
+      }
+
     } finally {
       client.release();
     }
@@ -502,15 +536,14 @@ class PointCalcService {
     let processedCount = 0;
     let skippedCount = 0;
 
-    // --- Process ทีละเอกสาร (แต่ละตัว commit เอง) ---
     for (const doc of saleDocs) {
-      const hasPoints = await this.processOneDoc(doc, 44);
+      const hasPoints = await this.processOneDoc(doc, 44, lookups);
       if (hasPoints) processedCount++;
       else skippedCount++;
     }
 
     for (const doc of returnDocs) {
-      const hasPoints = await this.processOneDoc(doc, 48);
+      const hasPoints = await this.processOneDoc(doc, 48, lookups);
       if (hasPoints) processedCount++;
       else skippedCount++;
     }
@@ -527,15 +560,13 @@ class PointCalcService {
     try {
       await client.query('BEGIN');
 
-      // ตรวจสอบช่วงวันที่ active
-      const periodFilter = await this.getActivePeriodFilter(client, 1); // offset=1 เพราะ $1 = custCode
+      const periodFilter = await this.getActivePeriodFilter(client, 1);
       if (!periodFilter) {
         await client.query('COMMIT');
         return { pointBalance: 0, rewardPoint: 0, message: 'ไม่มีช่วงวันที่ให้แต้มที่เปิดใช้งาน' };
       }
 
       // ลบเฉพาะรายการที่มาจากการคำนวณอัตโนมัติ (มี doc_no_sale หรือ doc_no_return)
-      // ไม่ลบรายการ manual: เพิ่มแต้ม, ใช้แต้ม, ยกเลิกใช้แต้ม (ไม่มี doc_no_sale/doc_no_return)
       await client.query(
         `DELETE FROM mb_point_trans_detail WHERE doc_no IN (
            SELECT doc_no FROM mb_point_trans
@@ -554,7 +585,17 @@ class PointCalcService {
         [custCode]
       );
 
-      // Re-process sale docs — filter ตาม period
+      // Preload item_codes ของลูกค้ารายนี้ทีเดียว
+      const itemRes = await client.query(
+        `SELECT DISTINCT d.item_code
+         FROM ic_trans_detail d
+         JOIN ic_trans t ON t.doc_no = d.doc_no
+         WHERE t.cust_code = $1 AND t.trans_flag IN (44, 48) AND t.last_status = 0`,
+        [custCode]
+      );
+      const lookups = await this.preloadLookups(client, itemRes.rows.map(r => r.item_code));
+
+      // Re-process sale docs
       const saleDocs = await client.query(
         `SELECT t.doc_date, t.doc_time, t.doc_no, t.doc_ref, t.doc_ref_date, t.cust_code, t.lastedit_datetime
          FROM ic_trans t WHERE t.trans_flag = 44 AND t.last_status = 0 AND t.cust_code = $1
@@ -564,7 +605,7 @@ class PointCalcService {
       );
 
       for (const doc of saleDocs.rows) {
-        const trans = await this.calcSaleDoc(client, doc);
+        const trans = await this.calcSaleDoc(client, doc, lookups);
         if (trans) {
           const docNo = await this.generateDocNo(client);
           await this.savePointTrans(client, docNo, trans);
@@ -578,7 +619,7 @@ class PointCalcService {
         }
       }
 
-      // Re-process return docs — filter ตาม period
+      // Re-process return docs
       const returnDocs = await client.query(
         `SELECT t.doc_date, t.doc_time, t.doc_no, t.doc_ref, t.doc_ref_date, t.cust_code, t.lastedit_datetime
          FROM ic_trans t WHERE t.trans_flag = 48 AND t.last_status = 0 AND t.cust_code = $1
@@ -588,7 +629,7 @@ class PointCalcService {
       );
 
       for (const doc of returnDocs.rows) {
-        const trans = await this.calcReturnDoc(client, doc);
+        const trans = await this.calcReturnDoc(client, doc, lookups);
         if (trans) {
           const docNo = await this.generateDocNo(client);
           await this.savePointTrans(client, docNo, trans);
