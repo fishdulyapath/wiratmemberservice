@@ -9,58 +9,62 @@ const router = express.Router();
 // ลอง ar_customer (member) ก่อน → ถ้าไม่เจอ ลอง erp_user (staff)
 router.post("/login", async (req, res) => {
   try {
-    // console.log("Login attempt:", req.body);
-    const { username, password } = req.body;
+    const { username, password, login_mode } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: "กรุณากรอก username และ password" });
     }
 
+    // login_mode: "member" = ค้นหาเฉพาะ ar_customer, "staff" = ค้นหาเฉพาะ erp_user
+    // ถ้าไม่ระบุ = ลองทั้ง 2 (ค้นหา ar_customer ก่อน)
+
     // 1. ลองหาจาก ar_customer (สมาชิก)
-    //    code = username, country = password, name_1 = ชื่อ
-    const custResult = await pool.query("SELECT code, country, name_1, point_balance, reward_point FROM ar_customer WHERE code = $1", [username]);
+    if (login_mode !== "staff") {
+      const custResult = await pool.query("SELECT code, country, name_1, point_balance, reward_point FROM ar_customer WHERE code = $1", [username]);
 
-    if (custResult.rows.length > 0) {
-      const cust = custResult.rows[0];
-      if (cust.country !== password) {
-        return res.status(401).json({ error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+      if (custResult.rows.length > 0) {
+        const cust = custResult.rows[0];
+        if (cust.country !== password) {
+          return res.status(401).json({ error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+        }
+
+        const token = jwt.sign({ username: cust.code, role: "member", cust_code: cust.code, display_name: cust.name_1 }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "24h" });
+
+        return res.json({
+          token,
+          user: {
+            username: cust.code,
+            role: "member",
+            cust_code: cust.code,
+            display_name: cust.name_1,
+          },
+        });
       }
-
-      const token = jwt.sign({ username: cust.code, role: "member", cust_code: cust.code, display_name: cust.name_1 }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "24h" });
-
-      return res.json({
-        token,
-        user: {
-          username: cust.code,
-          role: "member",
-          cust_code: cust.code,
-          display_name: cust.name_1,
-        },
-      });
     }
 
     // 2. ลองหาจาก erp_user (พนักงาน)
-    //    code = username, password = password, name_1 = ชื่อ
-    const staffResult = await pool.query("SELECT code, password, name_1 FROM erp_user WHERE upper(code) = $1", [username.toUpperCase()]);
-    console.log(staffResult.rows);
-    if (staffResult.rows.length > 0) {
-      const staff = staffResult.rows[0];
-      if (staff.password !== password) {
-        return res.status(401).json({ error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+    if (login_mode !== "member") {
+      const staffResult = await pool.query("SELECT code, password, name_1 FROM erp_user WHERE upper(code) = $1", [username.toUpperCase()]);
+
+      if (staffResult.rows.length > 0) {
+        const staff = staffResult.rows[0];
+        if (staff.password !== password) {
+          return res.status(401).json({ error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
+        }
+
+        const token = jwt.sign({ username: staff.code, role: "staff", display_name: staff.name_1 }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "24h" });
+
+        return res.json({
+          token,
+          user: {
+            username: staff.code,
+            role: "staff",
+            display_name: staff.name_1,
+          },
+        });
       }
-
-      const token = jwt.sign({ username: staff.code, role: "staff", display_name: staff.name_1 }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "24h" });
-
-      return res.json({
-        token,
-        user: {
-          username: staff.code,
-          role: "staff",
-          display_name: staff.name_1,
-        },
-      });
     }
 
-    // ไม่เจอทั้ง 2 ตาราง
+    // ไม่เจอ
     return res.status(401).json({ error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
   } catch (err) {
     console.error("Login error:", err);

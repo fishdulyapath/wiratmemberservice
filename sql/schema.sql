@@ -6,6 +6,7 @@
 
 -- Point Transaction Header
 CREATE TABLE IF NOT EXISTS mb_point_trans (
+    roworder serial,
     doc_date DATE NOT NULL,
     doc_time VARCHAR(5),
     doc_no VARCHAR(25) NOT NULL,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS mb_point_trans (
 
 -- Point Transaction Detail (เก็บรายการสินค้า ไม่เก็บแต้ม — แต้มอยู่ที่ header)
 CREATE TABLE IF NOT EXISTS mb_point_trans_detail (
+    roworder serial,
     doc_date DATE NOT NULL,
     doc_no VARCHAR(25) NOT NULL,
     cust_code VARCHAR(25) NOT NULL,
@@ -38,7 +40,8 @@ CREATE TABLE IF NOT EXISTS mb_point_trans_detail (
     return_amount NUMERIC DEFAULT 0,
     total_amount NUMERIC DEFAULT 0,
     remark VARCHAR(255),
-    lastedit_datetime TIMESTAMP WITHOUT TIME ZONE
+    lastedit_datetime TIMESTAMP WITHOUT TIME ZONE,
+    PRIMARY KEY (roworder)
 );
 
 CREATE INDEX IF NOT EXISTS idx_mb_point_trans_cust ON mb_point_trans(cust_code);
@@ -48,6 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_mb_point_trans_detail_cust ON mb_point_trans_deta
 
 -- Point calculation tracking (to know which ic_trans docs have been processed)
 CREATE TABLE IF NOT EXISTS mb_point_calc_log (
+    roworder serial,
     doc_no VARCHAR(25) NOT NULL,
     trans_flag INTEGER NOT NULL,
     lastedit_datetime TIMESTAMP WITHOUT TIME ZONE,
@@ -68,6 +72,14 @@ CREATE TABLE IF NOT EXISTS mb_point_period (
     created_by VARCHAR(100),
     lastedit_datetime TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE ar_customer
+  ADD COLUMN IF NOT EXISTS reward_point numeric DEFAULT 0;
+
+-- ข้อมูลตัวอย่าง: ช่วงวันที่ให้แต้มปี 2026
+INSERT INTO mb_point_period (start_date, end_date, is_active, remark, created_by)
+SELECT '2026-01-01', '2026-12-31', true, 'ช่วงให้แต้มปี 2026', 'system'
+WHERE NOT EXISTS (SELECT 1 FROM mb_point_period WHERE start_date = '2026-01-01' AND end_date = '2026-12-31');
 
 -- ============================================================
 -- ไม่ต้องสร้างตาราง user แยก — ใช้ตารางจากระบบเดิม:
