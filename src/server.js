@@ -30,7 +30,8 @@ app.get('/api/health', (req, res) => {
 });
 
 // --- Timer: Auto point calculation ---
-const cronExpression = process.env.POINT_CALC_CRON || '*/30 * * * *';
+// ทำงานทุก 30 นาที เฉพาะช่วง 05:00-20:59 (GMT+7) หยุดช่วง 21:00-04:59
+const cronExpression = process.env.POINT_CALC_CRON || '*/30 5-20 * * *';
 let isProcessing = false;
 
 cron.schedule(cronExpression, async () => {
@@ -48,9 +49,11 @@ cron.schedule(cronExpression, async () => {
   } finally {
     isProcessing = false;
   }
+}, {
+  timezone: 'Asia/Bangkok'
 });
 
-console.log(`[Cron] Point calculation scheduled: ${cronExpression}`);
+console.log(`[Cron] Point calculation scheduled: ${cronExpression} (Asia/Bangkok, active 05:00-21:00)`);
 
 // Catch unhandled errors to prevent server crash
 process.on('unhandledRejection', (err) => {
